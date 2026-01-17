@@ -1,0 +1,44 @@
+version: '3.8'
+
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: qrow-iq-backend
+    ports:
+      - "8000:8000"
+    environment:
+      - GEMINI_API_KEY=${GEMINI_API_KEY:-}
+      - GOOGLE_TTS_KEY=${GOOGLE_TTS_KEY:-}
+      - GOOGLE_TTS_SERVICE_ACCOUNT_PATH=${GOOGLE_TTS_SERVICE_ACCOUNT_PATH:-}
+      - FRONTEND_URL=http://localhost:5173
+      - BACKEND_PORT=8000
+      - DEBUG=${DEBUG:-false}
+    volumes:
+      - ./backend/app:/app/app
+    restart: unless-stopped
+    networks:
+      - qrow-iq-network
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: qrow-iq-frontend
+    ports:
+      - "5173:5173"
+    environment:
+      - VITE_BACKEND_URL=http://localhost:8000
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+    restart: unless-stopped
+    networks:
+      - qrow-iq-network
+    depends_on:
+      - backend
+
+networks:
+  qrow-iq-network:
+    driver: bridge

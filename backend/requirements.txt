@@ -1,0 +1,28 @@
+# Qrow IQ Backend Dependencies
+# FastAPI and ASGI server
+fastapi==0.104.1
+uvicorn[standard]==0.24.0
+websockets==12.0
+
+# Data validation and settings
+pydantic==2.5.0
+pydantic-settings==2.1.0
+
+# Environment variables
+python-dotenv==1.0.0
+
+# HTTP client for external APIs (Phase 3)
+httpx==0.25.2
+
+# Logging and utilities
+python-json-logger==2.0.7
+
+# PDF generation (Phase 6)
+reportlab==4.0.7
+
+# Google Cloud TTS (Phase 3)
+google-cloud-texttospeech==2.14.2
+google-auth==2.25.2
+
+# Gemini API (Phase 3)
+google-generativeai==0.3.1
