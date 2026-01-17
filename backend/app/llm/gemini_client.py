@@ -5,7 +5,8 @@ Strict FAANG-style HR interviewer persona
 import os
 import logging
 from typing import Dict, List, Optional, Tuple
-import google.generativeai as genai
+from google import genai
+from google.genai import types
 
 from app.core.config import settings
 
@@ -24,25 +25,18 @@ class GeminiClient:
         if not api_key:
             logger.warning("GEMINI_API_KEY not set - Gemini features will be disabled")
             self.client = None
-            self.model = None
+            self.model_name = None
             return
         
         try:
-            genai.configure(api_key=api_key)
-            # Use gemini-2.0-flash-exp or fallback to gemini-pro
-            self.model_name = "gemini-2.0-flash-exp"
-            try:
-                self.model = genai.GenerativeModel(self.model_name)
-            except Exception:
-                logger.warning(f"Model {self.model_name} not available, using gemini-pro")
-                self.model_name = "gemini-pro"
-                self.model = genai.GenerativeModel(self.model_name)
+            self.client = genai.Client(api_key=api_key)
+            self.model_name = "gemini-2.5-flash"
             
             logger.info(f"Gemini client initialized with model: {self.model_name}")
         except Exception as e:
             logger.error(f"Failed to initialize Gemini client: {e}")
             self.client = None
-            self.model = None
+            self.model_name = None
     
     def _get_system_prompt(self, job_role: str, job_description: str) -> str:
         """
@@ -89,7 +83,7 @@ Generate questions that:
         Returns:
             First interview question
         """
-        if not self.model:
+        if not self.client:
             return "Welcome to your mock interview. Please tell me about yourself and why you're interested in this role."
         
         try:
@@ -104,7 +98,15 @@ Generate a concise, professional opening question (1-2 sentences) that:
 
 Return ONLY the question text, no additional commentary."""
             
-            response = self.model.generate_content(prompt)
+            response = self.client.models.generate_content(
+                model=self.model_name,
+                contents=[
+                    types.Content(
+                        role="user",
+                        parts=[types.Part.from_text(text=prompt)]
+                    )
+                ]
+            )
             question = response.text.strip()
             
             # Clean up any markdown or extra formatting
@@ -140,7 +142,7 @@ Return ONLY the question text, no additional commentary."""
         Returns:
             Next interview question
         """
-        if not self.model:
+        if not self.client:
             return "Thank you for that answer. Can you tell me more about your experience?"
         
         try:
@@ -167,7 +169,15 @@ Generate the next interview question (1-2 sentences) that:
 
 Return ONLY the question text, no additional commentary."""
             
-            response = self.model.generate_content(prompt)
+            response = self.client.models.generate_content(
+                model=self.model_name,
+                contents=[
+                    types.Content(
+                        role="user",
+                        parts=[types.Part.from_text(text=prompt)]
+                    )
+                ]
+            )
             question = response.text.strip()
             
             # Clean up formatting
@@ -205,7 +215,7 @@ Return ONLY the question text, no additional commentary."""
             - weaknesses: List[str]
             - strengths: List[str]
         """
-        if not self.model:
+        if not self.client:
             return {
                 "quality_score": 5.0,
                 "needs_followup": False,
@@ -233,7 +243,15 @@ NEEDS_FOLLOWUP: [yes/no]
 WEAKNESSES: [comma-separated list]
 STRENGTHS: [comma-separated list]"""
             
-            response = self.model.generate_content(prompt)
+            response = self.client.models.generate_content(
+                model=self.model_name,
+                contents=[
+                    types.Content(
+                        role="user",
+                        parts=[types.Part.from_text(text=prompt)]
+                    )
+                ]
+            )
             text = response.text.strip()
             
             # Parse response
@@ -305,7 +323,7 @@ STRENGTHS: [comma-separated list]"""
             - strengths: List[str]
             - reasoning: str
         """
-        if not self.model:
+        if not self.client:
             return {
                 "technical_depth": 5.0,
                 "communication": 5.0,
@@ -354,7 +372,15 @@ WEAKNESSES: [comma-separated list]
 STRENGTHS: [comma-separated list]
 REASONING: [brief explanation]"""
             
-            response = self.model.generate_content(prompt)
+            response = self.client.models.generate_content(
+                model=self.model_name,
+                contents=[
+                    types.Content(
+                        role="user",
+                        parts=[types.Part.from_text(text=prompt)]
+                    )
+                ]
+            )
             text = response.text.strip()
             
             # Parse response
@@ -450,7 +476,7 @@ REASONING: [brief explanation]"""
         Returns:
             Follow-up question
         """
-        if not self.model:
+        if not self.client:
             return "Can you provide more specific details about that?"
         
         try:
@@ -469,7 +495,15 @@ Generate a concise follow-up question (1-2 sentences) that:
 
 Return ONLY the question text, no additional commentary."""
             
-            response = self.model.generate_content(prompt)
+            response = self.client.models.generate_content(
+                model=self.model_name,
+                contents=[
+                    types.Content(
+                        role="user",
+                        parts=[types.Part.from_text(text=prompt)]
+                    )
+                ]
+            )
             question = response.text.strip()
             
             # Clean up formatting
