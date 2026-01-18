@@ -3,10 +3,11 @@
  * Google Meet style dark theme with centered mic button and waveform
  */
 import { useState, useEffect, useRef } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { useNavigate, useLocation } from 'react-router-dom'
 import { WebSocketClient, ServerMessageType, MessageType } from '../services/websocket'
 import { AudioRecorder } from '../audio/recorder'
 import { SilenceDetector } from '../audio/silenceDetector'
+import { speak } from '../audio/tts'
 import MicButton from '../components/MicButton'
 import Waveform from '../components/Waveform'
 import Timer from '../components/Timer'
@@ -16,17 +17,35 @@ import StatusIndicator from '../components/StatusIndicator'
 
 type InterviewState = 'idle' | 'setup' | 'listening' | 'thinking' | 'speaking' | 'completed'
 
+interface LocationState {
+  jobRole: string
+  jobDescription: string
+  questionCount: number
+}
+
 export default function Interview() {
   const navigate = useNavigate()
+  const location = useLocation()
+  const locationState = location.state as LocationState | null
+
+  // Redirect to landing if no job data
+  useEffect(() => {
+    if (!locationState?.jobRole) {
+      navigate('/', { replace: true })
+    }
+  }, [locationState, navigate])
+
   const [sessionId] = useState(() => `session-${Date.now()}`)
   const [state, setState] = useState<InterviewState>('idle')
   const [isConnected, setIsConnected] = useState(false)
   const [currentQuestion, setCurrentQuestion] = useState<string>('')
+  const [currentTopic, setCurrentTopic] = useState<string>('')
   const [questionNumber, setQuestionNumber] = useState(0)
-  const [totalQuestions, setTotalQuestions] = useState(5)
+  const [totalQuestions, setTotalQuestions] = useState(locationState?.questionCount || 5)
   const [statusMessage, setStatusMessage] = useState('Ready to start interview')
   const [audioLevel, setAudioLevel] = useState(0)
   const [interviewStarted, setInterviewStarted] = useState(false)
+  const [userTranscript, setUserTranscript] = useState('')
 
   const wsClientRef = useRef<WebSocketClient | null>(null)
   const recorderRef = useRef<AudioRecorder | null>(null)
@@ -72,16 +91,20 @@ export default function Interview() {
   const handleServerMessage = (message: any) => {
     switch (message.type) {
       case ServerMessageType.QUESTION_READY:
+        // Fallback for backward compatibility
         setCurrentQuestion(message.question)
         setQuestionNumber(message.question_number)
         setTotalQuestions(message.total_questions)
-        setState('speaking')
-        setStatusMessage('Question ready')
+        playTTS(message.question)
         break
 
-      case ServerMessageType.TTS_AUDIO:
-        // Phase 3: Play TTS audio
-        playTTSAudio(message.audio_base64, message.audio_format)
+      case ServerMessageType.QUESTION:
+        console.log("Received next question from server", message)
+        setCurrentQuestion(message.text)
+        setCurrentTopic(message.topic || '')
+        setQuestionNumber(message.index)
+        setTotalQuestions(message.total)
+        playTTS(message.text)
         break
 
       case ServerMessageType.STATE_UPDATE:
@@ -96,6 +119,7 @@ export default function Interview() {
       case ServerMessageType.INTERVIEW_COMPLETE:
         setState('completed')
         setStatusMessage('Interview completed!')
+        console.log("Interview complete, navigating to report", message)
         // Navigate to report page after a delay
         setTimeout(() => {
           navigate(`/report/${sessionId}`)
@@ -119,14 +143,18 @@ export default function Interview() {
       return
     }
 
-    // For Phase 1, we'll use placeholder values
-    // Phase 2-3 will add proper job role/description input
+    if (!locationState?.jobRole) {
+      navigate('/', { replace: true })
+      return
+    }
+
+    // Use job data from landing page
     wsClientRef.current.send({
       type: MessageType.START_INTERVIEW,
       session_id: sessionId,
-      job_role: 'Software Engineer',
-      job_description: 'Full-stack development role',
-      question_count: totalQuestions,
+      job_role: locationState.jobRole,
+      job_description: locationState.jobDescription,
+      question_count: locationState.questionCount,
     })
 
     setState('setup')
@@ -154,7 +182,13 @@ export default function Interview() {
       // Initialize recorder
       const recorder = new AudioRecorder({
         onTranscript: (transcript, isFinal) => {
+          // Update live transcript for UI
+          setUserTranscript(transcript)
+
           if (wsClientRef.current && isConnected) {
+            // We only send "final" updates to the server here if using a streaming backend,
+            // but currently we just send the final block at the end.
+            // Keeping the message structure for possible stream display on backend.
             wsClientRef.current.send({
               type: MessageType.TRANSCRIBE,
               session_id: sessionId,
@@ -195,7 +229,11 @@ export default function Interview() {
         const silenceDetector = new SilenceDetector({
           onSilenceDetected: (durationSeconds) => {
             console.log(`Silence detected: ${durationSeconds.toFixed(1)}s`)
-            // Send silence detected message
+            console.log(`Silence detected: ${durationSeconds.toFixed(1)}s`)
+            // Auto-stop recording first (this sends final transcript)
+            stopListening()
+
+            // Then send silence detected message to trigger processing
             if (wsClientRef.current && isConnected) {
               wsClientRef.current.send({
                 type: MessageType.SILENCE_DETECTED,
@@ -203,8 +241,6 @@ export default function Interview() {
                 duration_seconds: durationSeconds,
               })
             }
-            // Auto-stop recording
-            stopListening()
           },
           onAudioLevel: (level) => {
             // Update audio level for waveform visualization
@@ -230,7 +266,9 @@ export default function Interview() {
     if (recorderRef.current) {
       // Get final transcript before stopping
       const finalTranscript = recorderRef.current.getTranscriptBuffer()
-      if (finalTranscript && wsClientRef.current && isConnected) {
+      // Check wsClient directly as isConnected might be stale in closure if not careful, though here it looks ok.
+      // Better to check wsClientRef.current.readyState if accessible, but existing logic is fine.
+      if (finalTranscript && wsClientRef.current) {
         wsClientRef.current.send({
           type: MessageType.TRANSCRIBE,
           session_id: sessionId,
@@ -252,44 +290,23 @@ export default function Interview() {
     setStatusMessage('Processing your answer...')
   }
 
-  // Play TTS audio (Phase 3)
-  const playTTSAudio = async (audioBase64: string, audioFormat: string) => {
-    try {
-      // Decode base64 audio
-      const audioData = atob(audioBase64)
-      const audioArray = new Uint8Array(audioData.length)
-      for (let i = 0; i < audioData.length; i++) {
-        audioArray[i] = audioData.charCodeAt(i)
-      }
-
-      // Create blob and audio element
-      const blob = new Blob([audioArray], { type: audioFormat || 'audio/mp3' })
-      const audioUrl = URL.createObjectURL(blob)
-      const audio = new Audio(audioUrl)
-
-      audio.onended = () => {
-        URL.revokeObjectURL(audioUrl)
-        // After audio finishes, transition to listening state
+  // Play TTS audio using Web Speech API (Phase 3 Refactor)
+  const playTTS = (text: string) => {
+    speak(
+      text,
+      () => {
+        // On end: transition to listening
         setState('listening')
         setStatusMessage('Listening for your answer...')
-        // Auto-start listening
+        setUserTranscript('') // Clear previous answer
         startListening()
+      },
+      () => {
+        // On start: update UI
+        setState('speaking')
+        setStatusMessage('AI Interviewer is speaking...')
       }
-
-      audio.onerror = (error) => {
-        console.error('Audio playback error:', error)
-        URL.revokeObjectURL(audioUrl)
-        setStatusMessage('Audio playback error')
-      }
-
-      // Play audio
-      await audio.play()
-      setState('speaking')
-      setStatusMessage('Playing question...')
-    } catch (error) {
-      console.error('Failed to play TTS audio:', error)
-      setStatusMessage('Failed to play audio')
-    }
+    )
   }
 
   // Determine avatar state
@@ -311,14 +328,13 @@ export default function Interview() {
         <div className="flex items-center space-x-4">
           {/* Timer */}
           {interviewStarted && <Timer isActive={state !== 'idle' && state !== 'completed'} />}
-          
+
           {/* Connection Status */}
           <div
-            className={`px-3 py-1 rounded-full text-xs font-medium ${
-              isConnected
-                ? 'bg-meet-green text-white'
-                : 'bg-meet-red text-white'
-            }`}
+            className={`px-3 py-1 rounded-full text-xs font-medium ${isConnected
+              ? 'bg-meet-green text-white'
+              : 'bg-meet-red text-white'
+              }`}
           >
             {isConnected ? 'Connected' : 'Disconnected'}
           </div>
@@ -336,6 +352,7 @@ export default function Interview() {
         <div className="w-full max-w-4xl flex justify-center">
           <QuestionPanel
             question={currentQuestion}
+            topic={currentTopic}
             questionNumber={questionNumber}
             totalQuestions={totalQuestions}
             isVisible={!!currentQuestion && state !== 'idle'}
@@ -346,6 +363,15 @@ export default function Interview() {
         <div className="w-full max-w-4xl">
           <Waveform isActive={state === 'listening'} audioLevel={audioLevel} />
         </div>
+
+        {/* Live Transcript */}
+        {userTranscript && (
+          <div className="w-full max-w-2xl text-center">
+            <p className="text-meet-light-gray text-lg italic transition-all duration-300">
+              "{userTranscript}"
+            </p>
+          </div>
+        )}
 
         {/* Status Indicator */}
         <StatusIndicator status={state} message={statusMessage} />

@@ -23,6 +23,8 @@ class ConnectionManager:
         self.active_connections: Dict[str, WebSocket] = {}
         # Map session_id -> InterviewSession
         self.sessions: Dict[str, InterviewSession] = {}
+        # Map session_id -> InterviewOrchestrator
+        self.orchestrators = {}
     
     async def connect(self, websocket: WebSocket, session_id: str) -> bool:
         """
@@ -63,6 +65,20 @@ class ConnectionManager:
         except Exception as e:
             logger.error(f"Failed to send message to {session_id}: {e}")
             # Remove broken connection
+            self.disconnect(session_id)
+    
+    async def send_bytes(self, session_id: str, data: bytes):
+        """
+        Send raw bytes to a specific session (for audio streaming)
+        """
+        if session_id not in self.active_connections:
+            return
+        
+        connection = self.active_connections[session_id]
+        try:
+            await connection.send_bytes(data)
+        except Exception as e:
+            logger.error(f"Failed to send bytes to {session_id}: {e}")
             self.disconnect(session_id)
     
     async def broadcast(self, message: dict):

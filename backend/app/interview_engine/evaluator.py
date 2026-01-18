@@ -76,7 +76,7 @@ class EvaluationEngine:
         """Initialize evaluation engine"""
         pass
     
-    def evaluate_answer(
+    async def evaluate_answer(
         self,
         question: str,
         answer: str,
@@ -98,7 +98,7 @@ class EvaluationEngine:
             AnswerEvaluation with all scores and insights
         """
         # Use Gemini to evaluate with all 6 metrics
-        evaluation_result = gemini_client.evaluate_answer_detailed(
+        evaluation_result = await gemini_client.evaluate_answer_detailed(
             question=question,
             answer=answer,
             job_role=job_role,

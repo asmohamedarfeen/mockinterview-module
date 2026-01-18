@@ -13,10 +13,11 @@ export enum MessageType {
 }
 
 export enum ServerMessageType {
-  QUESTION_READY = "QUESTION_READY",
+  QUESTION = "question",
+  QUESTION_READY = "QUESTION_READY", // Keeping for backward compat if needed
   TTS_AUDIO = "TTS_AUDIO",
   EVALUATION_UPDATE = "EVALUATION_UPDATE",
-  INTERVIEW_COMPLETE = "INTERVIEW_COMPLETE",
+  INTERVIEW_COMPLETE = "interview_complete",
   ERROR = "ERROR",
   PONG = "PONG",
   STATE_UPDATE = "STATE_UPDATE",
@@ -48,6 +49,15 @@ export interface SilenceDetectedMessage {
 }
 
 // Server message interfaces
+export interface QuestionMessage {
+  type: ServerMessageType.QUESTION;
+  text: string;
+  topic?: string;
+  index: number;
+  total: number;
+  timestamp?: string;
+}
+
 export interface QuestionReadyMessage {
   type: ServerMessageType.QUESTION_READY;
   session_id: string;
@@ -100,6 +110,7 @@ export interface StateUpdateMessage {
 
 export type ClientMessage = StartInterviewMessage | TranscribeMessage | SilenceDetectedMessage;
 export type ServerMessage =
+  | QuestionMessage
   | QuestionReadyMessage
   | TTSAudioMessage
   | EvaluationUpdateMessage

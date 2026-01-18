@@ -30,7 +30,7 @@ class GeminiClient:
         
         try:
             self.client = genai.Client(api_key=api_key)
-            self.model_name = "gemini-2.5-flash"
+            self.model_name = "gemini-2.0-flash"
             
             logger.info(f"Gemini client initialized with model: {self.model_name}")
         except Exception as e:
@@ -68,11 +68,11 @@ Generate questions that:
 - Test specific job requirements
 - Maintain professional interview flow"""
     
-    def generate_first_question(
+    async def generate_first_question(
         self, 
         job_role: str, 
         job_description: str
-    ) -> str:
+    ) -> Dict[str, str]:
         """
         Generate the first interview question
         
@@ -81,54 +81,75 @@ Generate questions that:
             job_description: Job description text
             
         Returns:
-            First interview question
+            Dict with 'text' and 'topic'
         """
         if not self.client:
-            return "Welcome to your mock interview. Please tell me about yourself and why you're interested in this role."
+            raise RuntimeError(
+                "Gemini client is not initialized. Please ensure GEMINI_API_KEY is set in environment variables."
+            )
         
-        try:
-            prompt = f"""Generate the first interview question for a {job_role} position.
+        prompt = f"""Generate the first interview question for a {job_role} position.
 
 Job Description: {job_description}
 
-Generate a concise, professional opening question (1-2 sentences) that:
-1. Welcomes the candidate
-2. Asks about their background or interest in the role
-3. Sets a professional tone
+Generate a concise, professional opening question (1-2 sentences).
 
-Return ONLY the question text, no additional commentary."""
-            
-            response = self.client.models.generate_content(
-                model=self.model_name,
-                contents=[
-                    types.Content(
-                        role="user",
-                        parts=[types.Part.from_text(text=prompt)]
-                    )
-                ]
-            )
-            question = response.text.strip()
-            
-            # Clean up any markdown or extra formatting
-            question = question.replace("**", "").replace("*", "").strip()
-            if question.startswith('"') and question.endswith('"'):
-                question = question[1:-1]
-            
-            logger.info(f"Generated first question: {question[:50]}...")
-            return question
-            
-        except Exception as e:
-            logger.error(f"Failed to generate first question: {e}", exc_info=True)
-            return "Welcome to your mock interview. Please tell me about yourself and why you're interested in this role."
+OUTPUT FORMAT:
+TOPIC: [Short 2-3 word title, e.g. "Introduction"]
+QUESTION: [The question text]"""
+        
+        
+        config = types.GenerateContentConfig(
+            temperature=0.7,
+            top_p=0.95,
+            top_k=40,
+            max_output_tokens=8192,
+        )
+
+        response = await self.client.aio.models.generate_content(
+            model=self.model_name,
+            contents=[
+                types.Content(
+                    role="user",
+                    parts=[types.Part.from_text(text=prompt)]
+                )
+            ],
+            config=config
+        )
+        text = response.text.strip()
+        
+        topic = "Introduction"
+        question_text = text
+        
+        lines = text.split('\n')
+        for line in lines:
+            if line.startswith("TOPIC:"):
+                topic = line.split(":", 1)[1].strip()
+            elif line.startswith("QUESTION:"):
+                question_text = line.split(":", 1)[1].strip()
+                
+        if "QUESTION:" not in text and "TOPIC:" not in text:
+             question_text = text
+        
+        # Clean up
+        question_text = question_text.replace("**", "").strip()
+        if question_text.startswith('"') and question_text.endswith('"'):
+            question_text = question_text[1:-1]
+        
+        logger.info(f"Generated first question: {question_text[:50]}...")
+        return {
+            "text": question_text,
+            "topic": topic
+        }
     
-    def generate_next_question(
+    async def generate_next_question(
         self,
         job_role: str,
         job_description: str,
         conversation_history: List[Tuple[str, str]],  # List of (question, answer) tuples
         current_question_number: int,
         total_questions: int
-    ) -> str:
+    ) -> Dict[str, str]:
         """
         Generate next question based on conversation history
         
@@ -140,18 +161,19 @@ Return ONLY the question text, no additional commentary."""
             total_questions: Total number of questions
             
         Returns:
-            Next interview question
+            Dict with 'text' and 'topic' of the question
         """
         if not self.client:
-            return "Thank you for that answer. Can you tell me more about your experience?"
+            raise RuntimeError(
+                "Gemini client is not initialized. Please ensure GEMINI_API_KEY is set in environment variables."
+            )
         
-        try:
-            # Format conversation history
-            history_text = ""
-            for i, (q, a) in enumerate(conversation_history[-3:], 1):  # Last 3 Q&A pairs
-                history_text += f"\nQ{i}: {q}\nA{i}: {a}\n"
-            
-            prompt = f"""You are conducting a mock interview for a {job_role} position.
+        # Format conversation history
+        history_text = ""
+        for i, (q, a) in enumerate(conversation_history[-3:], 1):  # Last 3 Q&A pairs
+            history_text += f"\nQ{i}: {q}\nA{i}: {a}\n"
+        
+        prompt = f"""You are conducting a strict, dynamic mock interview for a {job_role} position.
 
 Job Description: {job_description}
 
@@ -160,39 +182,63 @@ Previous conversation:
 
 Current progress: Question {current_question_number + 1} of {total_questions}
 
-Generate the next interview question (1-2 sentences) that:
-1. Builds on the previous answers
-2. Tests specific job requirements from the description
-3. Probes deeper if previous answers were vague or incomplete
-4. Maintains professional interview flow
-5. Avoids repeating previous questions
+INSTRUCTIONS:
+1. You MUST reference a specific technical concept, tool, or claim mentioned in the candidate's LAST answer (A{len(conversation_history)}).
+2. Do NOT ask generic "standard" questions (e.g., "Tell me about a challenge") unless they are directly related to the specific context the candidate just provided.
+3. Be reactive. drill down. If they mentioned "Redis", ask about Redis strategies. If they mentioned "Leadership", ask about a specific leadership scenario they implied.
+4. Keep the question concise (1-2 sentences).
 
-Return ONLY the question text, no additional commentary."""
-            
-            response = self.client.models.generate_content(
-                model=self.model_name,
-                contents=[
-                    types.Content(
-                        role="user",
-                        parts=[types.Part.from_text(text=prompt)]
-                    )
-                ]
-            )
-            question = response.text.strip()
-            
-            # Clean up formatting
-            question = question.replace("**", "").replace("*", "").strip()
-            if question.startswith('"') and question.endswith('"'):
-                question = question[1:-1]
-            
-            logger.info(f"Generated question {current_question_number + 1}: {question[:50]}...")
-            return question
-            
-        except Exception as e:
-            logger.error(f"Failed to generate next question: {e}", exc_info=True)
-            return "Thank you for that answer. Can you tell me more about your experience?"
+OUTPUT FORMAT:
+Generate the response in the following format:
+TOPIC: [Short 2-3 word title of the topic being asked, e.g. "API Scalability", "Conflict Resolution"]
+QUESTION: [The interview question text]"""
+        
+        config = types.GenerateContentConfig(
+            temperature=0.7,
+            top_p=0.95,
+            top_k=40,
+            max_output_tokens=8192,
+        )
+        
+        response = await self.client.aio.models.generate_content(
+            model=self.model_name,
+            contents=[
+                types.Content(
+                    role="user",
+                    parts=[types.Part.from_text(text=prompt)]
+                )
+            ],
+            config=config
+        )
+        text = response.text.strip()
+        
+        topic = "General"
+        question_text = text
+        
+        # Simple parsing
+        lines = text.split('\n')
+        for line in lines:
+            if line.startswith("TOPIC:"):
+                topic = line.split(":", 1)[1].strip()
+            elif line.startswith("QUESTION:"):
+                question_text = line.split(":", 1)[1].strip()
+        
+        # Fallback if parsing failed but text exists
+        if "QUESTION:" not in text and "TOPIC:" not in text:
+             question_text = text
+
+        # Cleanup
+        question_text = question_text.replace("**", "").strip()
+        if question_text.startswith('"') and question_text.endswith('"'):
+            question_text = question_text[1:-1]
+        
+        logger.info(f"Generated question {current_question_number + 1}: {question_text[:50]}... Topic: {topic}")
+        return {
+            "text": question_text,
+            "topic": topic
+        }
     
-    def evaluate_answer(
+    async def evaluate_answer(
         self,
         question: str,
         answer: str,
@@ -216,15 +262,11 @@ Return ONLY the question text, no additional commentary."""
             - strengths: List[str]
         """
         if not self.client:
-            return {
-                "quality_score": 5.0,
-                "needs_followup": False,
-                "weaknesses": [],
-                "strengths": []
-            }
+            raise RuntimeError(
+                "Gemini client is not initialized. Please ensure GEMINI_API_KEY is set in environment variables."
+            )
         
-        try:
-            prompt = f"""Evaluate this interview answer for a {job_role} position.
+        prompt = f"""Evaluate this interview answer for a {job_role} position.
 
 Job Description: {job_description}
 
@@ -242,59 +284,58 @@ QUALITY_SCORE: [number]
 NEEDS_FOLLOWUP: [yes/no]
 WEAKNESSES: [comma-separated list]
 STRENGTHS: [comma-separated list]"""
-            
-            response = self.client.models.generate_content(
-                model=self.model_name,
-                contents=[
-                    types.Content(
-                        role="user",
-                        parts=[types.Part.from_text(text=prompt)]
-                    )
-                ]
-            )
-            text = response.text.strip()
-            
-            # Parse response
-            quality_score = 5.0
-            needs_followup = False
-            weaknesses = []
-            strengths = []
-            
-            for line in text.split('\n'):
-                line = line.strip()
-                if line.startswith('QUALITY_SCORE:'):
-                    try:
-                        quality_score = float(line.split(':', 1)[1].strip())
-                    except:
-                        pass
-                elif line.startswith('NEEDS_FOLLOWUP:'):
-                    needs_followup = line.split(':', 1)[1].strip().lower() == 'yes'
-                elif line.startswith('WEAKNESSES:'):
-                    weaknesses_text = line.split(':', 1)[1].strip()
-                    weaknesses = [w.strip() for w in weaknesses_text.split(',') if w.strip()]
-                elif line.startswith('STRENGTHS:'):
-                    strengths_text = line.split(':', 1)[1].strip()
-                    strengths = [s.strip() for s in strengths_text.split(',') if s.strip()]
-            
-            logger.info(f"Answer evaluation - Score: {quality_score}, Follow-up: {needs_followup}")
-            
-            return {
-                "quality_score": max(0, min(10, quality_score)),
-                "needs_followup": needs_followup,
-                "weaknesses": weaknesses,
-                "strengths": strengths
-            }
-            
-        except Exception as e:
-            logger.error(f"Failed to evaluate answer: {e}", exc_info=True)
-            return {
-                "quality_score": 5.0,
-                "needs_followup": False,
-                "weaknesses": [],
-                "strengths": []
-            }
+        
+        config = types.GenerateContentConfig(
+            temperature=0.2, # Lower temperature for evaluation
+            top_p=0.95,
+            top_k=40,
+            max_output_tokens=8192,
+        )
+
+        response = await self.client.aio.models.generate_content(
+            model=self.model_name,
+            contents=[
+                types.Content(
+                    role="user",
+                    parts=[types.Part.from_text(text=prompt)]
+                )
+            ],
+            config=config
+        )
+        text = response.text.strip()
+        
+        # Parse response
+        quality_score = 5.0
+        needs_followup = False
+        weaknesses = []
+        strengths = []
+        
+        for line in text.split('\n'):
+            line = line.strip()
+            if line.startswith('QUALITY_SCORE:'):
+                try:
+                    quality_score = float(line.split(':', 1)[1].strip())
+                except:
+                    pass
+            elif line.startswith('NEEDS_FOLLOWUP:'):
+                needs_followup = line.split(':', 1)[1].strip().lower() == 'yes'
+            elif line.startswith('WEAKNESSES:'):
+                weaknesses_text = line.split(':', 1)[1].strip()
+                weaknesses = [w.strip() for w in weaknesses_text.split(',') if w.strip()]
+            elif line.startswith('STRENGTHS:'):
+                strengths_text = line.split(':', 1)[1].strip()
+                strengths = [s.strip() for s in strengths_text.split(',') if s.strip()]
+        
+        logger.info(f"Answer evaluation - Score: {quality_score}, Follow-up: {needs_followup}")
+        
+        return {
+            "quality_score": max(0, min(10, quality_score)),
+            "needs_followup": needs_followup,
+            "weaknesses": weaknesses,
+            "strengths": strengths
+        }
     
-    def evaluate_answer_detailed(
+    async def evaluate_answer_detailed(
         self,
         question: str,
         answer: str,
@@ -324,21 +365,11 @@ STRENGTHS: [comma-separated list]"""
             - reasoning: str
         """
         if not self.client:
-            return {
-                "technical_depth": 5.0,
-                "communication": 5.0,
-                "confidence": 5.0,
-                "logical_thinking": 5.0,
-                "problem_solving": 5.0,
-                "culture_fit": 5.0,
-                "needs_followup": False,
-                "weaknesses": [],
-                "strengths": [],
-                "reasoning": ""
-            }
+            raise RuntimeError(
+                "Gemini client is not initialized. Please ensure GEMINI_API_KEY is set in environment variables."
+            )
         
-        try:
-            prompt = f"""Evaluate this interview answer for a {job_role} position across 6 specific metrics.
+        prompt = f"""Evaluate this interview answer for a {job_role} position across 6 specific metrics.
 
 Job Description: {job_description}
 
@@ -371,152 +402,159 @@ NEEDS_FOLLOWUP: [yes/no]
 WEAKNESSES: [comma-separated list]
 STRENGTHS: [comma-separated list]
 REASONING: [brief explanation]"""
+        
+        config = types.GenerateContentConfig(
+            temperature=0.2, # Lower temperature for evaluation
+            top_p=0.95,
+            top_k=40,
+            max_output_tokens=8192,
+        )
+        
+        response = await self.client.aio.models.generate_content(
+            model=self.model_name,
+            contents=[
+                types.Content(
+                    role="user",
+                    parts=[types.Part.from_text(text=prompt)]
+                )
+            ],
+            config=config
+        )
+        text = response.text.strip()
+        
+        # Parse response
+        scores = {
+            "technical_depth": 5.0,
+            "communication": 5.0,
+            "confidence": 5.0,
+            "logical_thinking": 5.0,
+            "problem_solving": 5.0,
+            "culture_fit": 5.0,
+        }
+        needs_followup = False
+        weaknesses = []
+        strengths = []
+        reasoning = ""
+        
+        current_section = None
+        for line in text.split('\n'):
+            line = line.strip()
+            if not line:
+                continue
             
-            response = self.client.models.generate_content(
-                model=self.model_name,
-                contents=[
-                    types.Content(
-                        role="user",
-                        parts=[types.Part.from_text(text=prompt)]
-                    )
-                ]
-            )
-            text = response.text.strip()
+            # Parse metric scores
+            for metric in scores.keys():
+                if line.upper().startswith(metric.upper().replace('_', '_') + ':'):
+                    try:
+                        score = float(line.split(':', 1)[1].strip())
+                        scores[metric] = max(0.0, min(10.0, score))
+                    except:
+                        pass
+                    break
             
-            # Parse response
-            scores = {
-                "technical_depth": 5.0,
-                "communication": 5.0,
-                "confidence": 5.0,
-                "logical_thinking": 5.0,
-                "problem_solving": 5.0,
-                "culture_fit": 5.0,
-            }
-            needs_followup = False
-            weaknesses = []
-            strengths = []
-            reasoning = ""
-            
-            current_section = None
-            for line in text.split('\n'):
-                line = line.strip()
-                if not line:
-                    continue
-                
-                # Parse metric scores
-                for metric in scores.keys():
-                    if line.upper().startswith(metric.upper().replace('_', '_') + ':'):
-                        try:
-                            score = float(line.split(':', 1)[1].strip())
-                            scores[metric] = max(0.0, min(10.0, score))
-                        except:
-                            pass
-                        break
-                
-                # Parse other fields
-                if line.upper().startswith('NEEDS_FOLLOWUP:'):
-                    needs_followup = line.split(':', 1)[1].strip().lower() == 'yes'
-                elif line.upper().startswith('WEAKNESSES:'):
-                    weaknesses_text = line.split(':', 1)[1].strip()
-                    weaknesses = [w.strip() for w in weaknesses_text.split(',') if w.strip()]
-                elif line.upper().startswith('STRENGTHS:'):
-                    strengths_text = line.split(':', 1)[1].strip()
-                    strengths = [s.strip() for s in strengths_text.split(',') if s.strip()]
-                elif line.upper().startswith('REASONING:'):
-                    reasoning = line.split(':', 1)[1].strip()
-            
-            result = {
-                **scores,
-                "needs_followup": needs_followup,
-                "weaknesses": weaknesses,
-                "strengths": strengths,
-                "reasoning": reasoning
-            }
-            
-            logger.info(
-                f"Detailed evaluation - "
-                f"Tech: {scores['technical_depth']:.1f}, "
-                f"Comm: {scores['communication']:.1f}, "
-                f"Conf: {scores['confidence']:.1f}"
-            )
-            
-            return result
-            
-        except Exception as e:
-            logger.error(f"Failed to evaluate answer in detail: {e}", exc_info=True)
-            return {
-                "technical_depth": 5.0,
-                "communication": 5.0,
-                "confidence": 5.0,
-                "logical_thinking": 5.0,
-                "problem_solving": 5.0,
-                "culture_fit": 5.0,
-                "needs_followup": False,
-                "weaknesses": [],
-                "strengths": [],
-                "reasoning": ""
-            }
+            # Parse other fields
+            if line.upper().startswith('NEEDS_FOLLOWUP:'):
+                needs_followup = line.split(':', 1)[1].strip().lower() == 'yes'
+            elif line.upper().startswith('WEAKNESSES:'):
+                weaknesses_text = line.split(':', 1)[1].strip()
+                weaknesses = [w.strip() for w in weaknesses_text.split(',') if w.strip()]
+            elif line.upper().startswith('STRENGTHS:'):
+                strengths_text = line.split(':', 1)[1].strip()
+                strengths = [s.strip() for s in strengths_text.split(',') if s.strip()]
+            elif line.upper().startswith('REASONING:'):
+                reasoning = line.split(':', 1)[1].strip()
+        
+        result = {
+            **scores,
+            "needs_followup": needs_followup,
+            "weaknesses": weaknesses,
+            "strengths": strengths,
+            "reasoning": reasoning
+        }
+        
+        logger.info(
+            f"Detailed evaluation - "
+            f"Tech: {scores['technical_depth']:.1f}, "
+            f"Comm: {scores['communication']:.1f}, "
+            f"Conf: {scores['confidence']:.1f}"
+        )
+        
+        return result
     
-    def generate_followup_question(
+    async def generate_followup_question(
         self,
         original_question: str,
         answer: str,
         weaknesses: List[str],
         job_role: str
-    ) -> str:
+    ) -> Dict[str, str]:
         """
         Generate a follow-up question to probe deeper
         
-        Args:
-            original_question: The original question
-            answer: The candidate's answer
-            weaknesses: List of identified weaknesses
-            job_role: Job role
-            
         Returns:
-            Follow-up question
+            Dict with 'text' and 'topic'
         """
         if not self.client:
-            return "Can you provide more specific details about that?"
+            raise RuntimeError(
+                "Gemini client is not initialized. Please ensure GEMINI_API_KEY is set in environment variables."
+            )
         
-        try:
-            weaknesses_text = ", ".join(weaknesses) if weaknesses else "answer was vague or incomplete"
-            
-            prompt = f"""The candidate was asked: "{original_question}"
+        weaknesses_text = ", ".join(weaknesses) if weaknesses else "answer was vague or incomplete"
+        
+        prompt = f"""The candidate was asked: "{original_question}"
 They answered: "{answer}"
 
 Weaknesses identified: {weaknesses_text}
 
-Generate a concise follow-up question (1-2 sentences) that:
-1. Probes deeper into the weaknesses
-2. Asks for specific examples or details
-3. Maintains professional tone
-4. Helps assess the candidate better
+Generate a concise follow-up question (1-2 sentences) that drills deeper into the specific concepts mentioned (or missed).
 
-Return ONLY the question text, no additional commentary."""
-            
-            response = self.client.models.generate_content(
-                model=self.model_name,
-                contents=[
-                    types.Content(
-                        role="user",
-                        parts=[types.Part.from_text(text=prompt)]
-                    )
-                ]
-            )
-            question = response.text.strip()
-            
-            # Clean up formatting
-            question = question.replace("**", "").replace("*", "").strip()
-            if question.startswith('"') and question.endswith('"'):
-                question = question[1:-1]
-            
-            logger.info(f"Generated follow-up question: {question[:50]}...")
-            return question
-            
-        except Exception as e:
-            logger.error(f"Failed to generate follow-up question: {e}", exc_info=True)
-            return "Can you provide more specific details about that?"
+OUTPUT FORMAT:
+TOPIC: [Short 2-3 word title, e.g. "Security Implementation", "Clarification"]
+QUESTION: [The question text]"""
+        
+        config = types.GenerateContentConfig(
+            temperature=0.7,
+            top_p=0.95,
+            top_k=40,
+            max_output_tokens=8192,
+        )
+        
+        response = await self.client.aio.models.generate_content(
+            model=self.model_name,
+            contents=[
+                types.Content(
+                    role="user",
+                    parts=[types.Part.from_text(text=prompt)]
+                )
+            ],
+            config=config
+        )
+        text = response.text.strip()
+        
+        topic = "Deep Dive"
+        question_text = text
+        
+        lines = text.split('\n')
+        for line in lines:
+            if line.startswith("TOPIC:"):
+                topic = line.split(":", 1)[1].strip()
+            elif line.startswith("QUESTION:"):
+                question_text = line.split(":", 1)[1].strip()
+        
+            # Fallback
+        if "QUESTION:" not in text and "TOPIC:" not in text:
+                question_text = text
+        
+        # Clean up formatting
+        question_text = question_text.replace("**", "").strip()
+        if question_text.startswith('"') and question_text.endswith('"'):
+            question_text = question_text[1:-1]
+        
+        logger.info(f"Generated follow-up question: {question_text[:50]}...")
+        return {
+            "text": question_text,
+            "topic": topic
+        }
 
 
 # Global Gemini client instance

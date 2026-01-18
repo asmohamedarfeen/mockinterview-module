@@ -17,6 +17,7 @@ export class AudioRecorder {
   private callbacks: RecorderCallbacks = {};
   private audioStream: MediaStream | null = null;
   private transcriptBuffer: string = "";
+  private currentInterim: string = "";
 
   constructor(callbacks: RecorderCallbacks = {}) {
     this.callbacks = callbacks;
@@ -56,23 +57,29 @@ export class AudioRecorder {
       // Update transcript buffer with final results
       if (finalTranscript) {
         this.transcriptBuffer += finalTranscript;
+        this.currentInterim = ""; // Clear interim once finalized
+      }
+
+      // Update current interim
+      if (interimTranscript) {
+        this.currentInterim = interimTranscript;
       }
 
       // Call callback with interim results (for real-time feedback)
-      if (interimTranscript && this.callbacks.onTranscript) {
-        const fullInterim = this.transcriptBuffer + interimTranscript;
-        this.callbacks.onTranscript(fullInterim.trim(), false);
-      }
-
-      // Call callback with final results
-      if (finalTranscript && this.callbacks.onTranscript) {
-        this.callbacks.onTranscript(this.transcriptBuffer.trim(), true);
+      if (this.callbacks.onTranscript) {
+        // Return accumulated final + current interim
+        const fullTranscript = (this.transcriptBuffer + this.currentInterim).trim();
+        // Determine isFinal based only on this specific event chunk, 
+        // but for the UI we mainly care about the text.
+        // True "isFinal" usually means the user stopped speaking or we manually stopped.
+        // We'll pass 'false' here as it's a stream update.
+        this.callbacks.onTranscript(fullTranscript, false);
       }
     };
 
     this.recognition.onerror = (event: SpeechRecognitionErrorEvent) => {
       console.error("Speech recognition error:", event.error);
-      
+
       // Handle specific error types
       if (event.error === "no-speech") {
         // No speech detected - not necessarily an error, just silence
@@ -129,6 +136,7 @@ export class AudioRecorder {
 
     // Reset transcript buffer
     this.transcriptBuffer = "";
+    this.currentInterim = "";
 
     try {
       this.recognition.start();
@@ -168,7 +176,7 @@ export class AudioRecorder {
       // Ignore errors when stopping
       console.debug("Error stopping recognition:", error);
     }
-    
+
     this.isRecording = false;
 
     // Clean up audio stream
@@ -211,7 +219,7 @@ export class AudioRecorder {
    * Get current transcript buffer
    */
   getTranscriptBuffer(): string {
-    return this.transcriptBuffer.trim();
+    return (this.transcriptBuffer + this.currentInterim).trim();
   }
 
   /**
@@ -219,6 +227,7 @@ export class AudioRecorder {
    */
   clearTranscriptBuffer(): void {
     this.transcriptBuffer = "";
+    this.currentInterim = "";
   }
 }
 

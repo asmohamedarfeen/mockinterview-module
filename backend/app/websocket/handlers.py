@@ -28,7 +28,6 @@ from app.models.interview import (
 )
 from app.interview_engine.orchestrator import InterviewOrchestrator
 from app.interview_engine.evaluator import evaluation_engine, EvaluationMetrics
-from app.tts.google_tts import tts_client
 
 logger = logging.getLogger(__name__)
 
@@ -80,36 +79,29 @@ async def handle_start_interview(session_id: str, message: Dict[str, Any]):
         
         # Create orchestrator
         orchestrator = InterviewOrchestrator(session)
-        # Store orchestrator in session (we'll use a simple approach for now)
-        # In production, you'd want a proper orchestrator manager
+        
+        # Store orchestrator in manager
+        manager.orchestrators[session_id] = orchestrator
         
         # Generate first question using Gemini
-        question = orchestrator.generate_first_question()
+        result = await orchestrator.generate_first_question()
+        question_text = result["text"]
+        topic = result.get("topic", "Introduction")
         
         # Update state
         manager.update_session_state(session_id, InterviewState.ASK_QUESTION)
         await send_state_update(session_id, InterviewState.ASK_QUESTION)
         
         # Send question
-        await send_question_ready(
-            session_id,
-            question=question,
-            question_number=1,
-            total_questions=start_msg.question_count
-        )
+        logger.info(f"Sending first question to frontend: {session_id}")
+        await manager.send_personal_message({
+            "type": "question",
+            "text": question_text,
+            "topic": topic,
+            "index": 1,
+            "total": start_msg.question_count
+        }, session_id)
         
-        # Generate and send TTS audio
-        if tts_client.is_available():
-            audio_base64 = tts_client.synthesize_speech(question)
-            if audio_base64:
-                await send_tts_audio(session_id, audio_base64)
-        else:
-            logger.warning("TTS not available - question sent as text only")
-        
-        # Store orchestrator reference (simple dict for now)
-        if not hasattr(manager, 'orchestrators'):
-            manager.orchestrators = {}
-        manager.orchestrators[session_id] = orchestrator
         
         logger.info(f"Interview started: {session_id} - {start_msg.job_role}")
     
@@ -131,7 +123,7 @@ async def handle_transcribe(session_id: str, message: Dict[str, Any]):
             return
         
         # Get orchestrator
-        orchestrator = getattr(manager, 'orchestrators', {}).get(session_id)
+        orchestrator = manager.orchestrators.get(session_id)
         if not orchestrator:
             logger.warning(f"No orchestrator found for session {session_id}")
             return
@@ -144,6 +136,46 @@ async def handle_transcribe(session_id: str, message: Dict[str, Any]):
         
         if transcribe_msg.is_final:
             logger.info(f"Final transcript received for {session_id}: {transcribe_msg.transcript[:50]}...")
+            
+            # --- START CONNECTED PIPELINE ---
+            logger.info(f"Sending transcript to Orchestrator for {session_id}")
+            
+            # Update state to processing
+            manager.update_session_state(session_id, InterviewState.EVALUATE)
+            await send_state_update(session_id, InterviewState.EVALUATE)
+            
+            # Call orchestrator to handle the answer
+            result = await orchestrator.handle_user_answer(session_id, transcribe_msg.transcript)
+            
+            if result["is_interview_complete"]:
+                logger.info(f"Interview complete for {session_id}, generating report")
+                # Send interview complete message
+                await manager.send_personal_message({
+                    "type": "interview_complete",
+                    "report": result.get("report", {})
+                }, session_id)
+            else:
+                next_question_data = result["next_question"]
+                question_text = next_question_data["text"]
+                topic = next_question_data.get("topic", "General")
+                
+                logger.info(f"Received next question: {question_text[:50]}...")
+                logger.info("Transitioning to ASK_QUESTION state")
+                
+                # Update state back to asking question
+                manager.update_session_state(session_id, InterviewState.ASK_QUESTION)
+                await send_state_update(session_id, InterviewState.ASK_QUESTION)
+                
+                # Send question to client (Simple JSON format)
+                logger.info(f"Sending next question to frontend: {session_id}")
+                await manager.send_personal_message({
+                    "type": "question",
+                    "text": question_text,
+                    "topic": topic,
+                    "index": result["question_index"],
+                    "total": session.question_count
+                }, session_id)
+            # --- END CONNECTED PIPELINE ---
     
     except Exception as e:
         logger.error(f"Failed to handle transcript for {session_id}: {e}", exc_info=True)
@@ -169,7 +201,7 @@ async def handle_silence_detected(session_id: str, message: Dict[str, Any]):
         await send_state_update(session_id, InterviewState.SILENCE_DETECT)
         
         # Get orchestrator
-        orchestrator = getattr(manager, 'orchestrators', {}).get(session_id)
+        orchestrator = manager.orchestrators.get(session_id)
         if not orchestrator:
             logger.warning(f"No orchestrator found for session {session_id}")
             return
@@ -180,7 +212,7 @@ async def handle_silence_detected(session_id: str, message: Dict[str, Any]):
         
         if current_answer:
             # Evaluate with all 6 metrics
-            evaluation = evaluation_engine.evaluate_answer(
+            evaluation = await evaluation_engine.evaluate_answer(
                 question=current_question,
                 answer=current_answer,
                 job_role=session.job_role,
@@ -230,7 +262,7 @@ async def handle_silence_detected(session_id: str, message: Dict[str, Any]):
             orchestrator.current_answer_buffer = ""
         else:
             # Fallback to old method if no answer
-            result = orchestrator.process_answer()
+            result = await orchestrator.process_answer()
         
         # Update state to evaluation
         manager.update_session_state(session_id, InterviewState.EVALUATE)
@@ -239,48 +271,48 @@ async def handle_silence_detected(session_id: str, message: Dict[str, Any]):
         # Decide next action
         if result["needs_followup"]:
             # Generate follow-up question
-            followup_question = orchestrator.generate_followup_question(result["evaluation"])
+            followup_result = await orchestrator.generate_followup_question(result["evaluation"])
             
-            if followup_question:
-                await send_question_ready(
-                    session_id,
-                    question=followup_question,
-                    question_number=session.current_question_number,
-                    total_questions=session.question_count
-                )
-                
-                # Generate and send TTS audio
-                if tts_client.is_available():
-                    audio_base64 = tts_client.synthesize_speech(followup_question)
-                    if audio_base64:
-                        await send_tts_audio(session_id, audio_base64)
+            if followup_result:
+                # Send follow-up question
+                logger.info(f"Sending follow-up question to frontend: {session_id}")
+                await manager.send_personal_message({
+                    "type": "question",
+                    "text": followup_result["text"],
+                    "topic": followup_result.get("topic", "Deep Dive"),
+                    "index": session.current_question_number,
+                    "total": session.question_count
+                }, session_id)
         else:
             # Check if we should continue
             if orchestrator.should_continue():
                 # Generate next question
-                next_question = orchestrator.generate_next_question()
+                next_result = await orchestrator.generate_next_question()
                 
-                if next_question:
-                    await send_question_ready(
-                        session_id,
-                        question=next_question,
-                        question_number=session.current_question_number,
-                        total_questions=session.question_count
-                    )
-                    
-                    # Generate and send TTS audio
-                    if tts_client.is_available():
-                        audio_base64 = tts_client.synthesize_speech(next_question)
-                        if audio_base64:
-                            await send_tts_audio(session_id, audio_base64)
+                if next_result:
+                    # Send next question
+                    logger.info(f"Sending next question to frontend: {session_id}")
+                    await manager.send_personal_message({
+                        "type": "question",
+                        "text": next_result["text"],
+                        "topic": next_result.get("topic", "General"),
+                        "index": session.current_question_number,
+                        "total": session.question_count
+                    }, session_id)
                 else:
                     # Interview complete
                     orchestrator.complete_interview()
-                    await send_interview_complete(session_id, session)
+                    await manager.send_personal_message({
+                        "type": "interview_complete",
+                        "report": {} 
+                    }, session_id)
             else:
                 # Interview complete
                 orchestrator.complete_interview()
-                await send_interview_complete(session_id, session)
+                await manager.send_personal_message({
+                    "type": "interview_complete",
+                    "report": {} 
+                }, session_id)
     
     except Exception as e:
         logger.error(f"Failed to handle silence for {session_id}: {e}", exc_info=True)
@@ -353,16 +385,6 @@ async def send_error(session_id: str, error_code: str, error_message: str):
     await manager.send_personal_message(msg.model_dump(), session_id)
 
 
-async def send_tts_audio(session_id: str, audio_base64: str):
-    """
-    Send TTS audio to client
-    """
-    msg = TTSAudioMessage(
-        session_id=session_id,
-        audio_base64=audio_base64,
-        audio_format="audio/mp3"
-    )
-    await manager.send_personal_message(msg.model_dump(), session_id)
 
 
 async def send_evaluation_update(session_id: str, evaluation, question_number: int):
@@ -400,7 +422,7 @@ async def send_interview_complete(session_id: str, session: InterviewSession):
     """
     
     # Get orchestrator for final evaluation
-    orchestrator = getattr(manager, 'orchestrators', {}).get(session_id)
+    orchestrator = manager.orchestrators.get(session_id)
     
     # Calculate final evaluation if we have evaluation history
     if session.evaluation_history and orchestrator:

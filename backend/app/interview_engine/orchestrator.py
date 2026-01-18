@@ -3,7 +3,7 @@ Interview Orchestrator
 Manages interview state machine, question flow, and follow-up logic
 """
 import logging
-from typing import List, Tuple, Optional, Dict, Set
+from typing import List, Tuple, Optional, Dict, Set, Any
 from datetime import datetime
 from enum import Enum
 
@@ -61,12 +61,12 @@ class InterviewOrchestrator:
         self.weak_areas: List[str] = []  # Areas where candidate struggled
         self.strengths: List[str] = []  # Areas where candidate excelled
     
-    def generate_first_question(self) -> str:
+    async def generate_first_question(self) -> Dict[str, str]:
         """
         Generate the first interview question
         
         Returns:
-            First question text
+            Dict containing 'text' and 'topic'
         """
         try:
             # Transition to ASK_QUESTION state
@@ -74,12 +74,14 @@ class InterviewOrchestrator:
         except StateTransitionError as e:
             logger.warning(f"State transition error: {e}, continuing anyway")
         
-        question = gemini_client.generate_first_question(
+        result = await gemini_client.generate_first_question(
             job_role=self.session.job_role,
             job_description=self.session.job_description
         )
         
-        self.session.questions.append(question)
+        question_text = result["text"]
+        
+        self.session.questions.append(question_text)
         self.session.current_question_number = 1
         self.session.state = InterviewState.ASK_QUESTION
         self.current_difficulty = DifficultyLevel.EASY
@@ -87,14 +89,14 @@ class InterviewOrchestrator:
         self.question_types_asked.append(QuestionType.GENERAL)
         
         logger.info(f"Generated first question for session {self.session.session_id}")
-        return question
+        return result
     
-    def generate_next_question(self) -> str:
+    async def generate_next_question(self) -> Dict[str, str]:
         """
         Generate the next question based on conversation history with difficulty ramping
         
         Returns:
-            Next question text
+            Dict containing 'text' and 'topic'
         """
         # Check if we've reached the question limit
         if self.session.current_question_number >= self.session.question_count:
@@ -110,7 +112,7 @@ class InterviewOrchestrator:
         except StateTransitionError as e:
             logger.warning(f"State transition error: {e}, continuing anyway")
         
-        question = gemini_client.generate_next_question(
+        result = await gemini_client.generate_next_question(
             job_role=self.session.job_role,
             job_description=self.session.job_description,
             conversation_history=self.conversation_history,
@@ -118,7 +120,9 @@ class InterviewOrchestrator:
             total_questions=self.session.question_count
         )
         
-        self.session.questions.append(question)
+        question_text = result["text"]
+        
+        self.session.questions.append(question_text)
         self.session.current_question_number += 1
         self.session.state = InterviewState.ASK_QUESTION
         self.pending_followup = False
@@ -128,7 +132,7 @@ class InterviewOrchestrator:
             f"Generated question {self.session.current_question_number} "
             f"(difficulty: {self.current_difficulty.value}) for session {self.session.session_id}"
         )
-        return question
+        return result
     
     def _update_difficulty(self):
         """
@@ -162,7 +166,7 @@ class InterviewOrchestrator:
             # Interim transcript - update buffer
             self.current_answer_buffer = transcript
     
-    def process_answer(self) -> Dict:
+    async def process_answer(self) -> Dict:
         """
         Process the current answer:
         - Evaluate answer quality
@@ -191,7 +195,7 @@ class InterviewOrchestrator:
         answer = self.current_answer_buffer
         
         # Evaluate answer
-        evaluation = gemini_client.evaluate_answer(
+        evaluation = await gemini_client.evaluate_answer(
             question=current_question,
             answer=answer,
             job_role=self.session.job_role,
@@ -238,7 +242,7 @@ class InterviewOrchestrator:
             "quality_score": quality_score
         }
     
-    def generate_followup_question(self, evaluation: Dict) -> str:
+    async def generate_followup_question(self, evaluation: Dict) -> Dict[str, str]:
         """
         Generate a follow-up question based on answer evaluation
         
@@ -246,7 +250,7 @@ class InterviewOrchestrator:
             evaluation: Evaluation results from process_answer
             
         Returns:
-            Follow-up question text
+            Dict containing 'text' and 'topic'
         """
         if not self.session.questions:
             return None
@@ -255,15 +259,17 @@ class InterviewOrchestrator:
         current_answer = self.session.answers[-1] if self.session.answers else ""
         weaknesses = evaluation.get("weaknesses", [])
         
-        followup_question = gemini_client.generate_followup_question(
+        result = await gemini_client.generate_followup_question(
             original_question=current_question,
             answer=current_answer,
             weaknesses=weaknesses,
             job_role=self.session.job_role
         )
         
+        question_text = result["text"]
+        
         # Add follow-up as a new question (but don't increment question number)
-        self.session.questions.append(followup_question)
+        self.session.questions.append(question_text)
         self.pending_followup = True
         
         # Update state machine
@@ -276,7 +282,7 @@ class InterviewOrchestrator:
         self.session.state = InterviewState.ASK_QUESTION
         
         logger.info(f"Generated follow-up question for session {self.session.session_id}")
-        return followup_question
+        return result
     
     def should_continue(self) -> bool:
         """
@@ -407,3 +413,62 @@ class InterviewOrchestrator:
             summary += f"A{i}: {a}\n\n"
         
         return summary
+    
+    async def handle_user_answer(self, session_id: str, user_answer: str) -> Dict[str, Any]:
+        """
+        Handle a complete user answer:
+        1. Process the answer (evaluate)
+        2. Decide next step (follow-up or next question)
+        3. Generate appropriate content
+        
+        Args:
+            session_id: Session ID
+            user_answer: Complete user answer text
+            
+        Returns:
+            Dict containing next question info or completion status
+        """
+        # Update buffer with final answer
+        self.current_answer_buffer = user_answer
+        
+        # Process the answer (evaluation)
+        process_result = await self.process_answer()
+        
+        next_question = None
+        is_followup = False
+        
+        # Decide next step based on process result
+        if process_result["needs_followup"]:
+            # Generate follow-up
+            next_question = await self.generate_followup_question(process_result["evaluation"])
+            is_followup = True
+            
+            if not next_question:
+                # Fallback if follow-up generation fails
+                logger.warning("Follow-up generation failed, proceeding to next question")
+                if self.should_continue():
+                    next_question = await self.generate_next_question()
+                    is_followup = False
+        
+        else:
+            # Regular flow
+            if self.should_continue():
+                next_question = await self.generate_next_question()
+                is_followup = False
+        
+        if next_question:
+            return {
+                "next_question": next_question,
+                "is_followup": is_followup,
+                "question_index": self.session.current_question_number,
+                "is_interview_complete": False
+            }
+        else:
+            # No next question generated => Interview Complete
+            self.complete_interview()
+            return {
+                "next_question": None,
+                "is_followup": False,
+                "question_index": self.session.current_question_number,
+                "is_interview_complete": True
+            }

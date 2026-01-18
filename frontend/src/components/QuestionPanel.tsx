@@ -6,6 +6,7 @@ import { useState, useEffect } from 'react'
 
 interface QuestionPanelProps {
   question: string
+  topic?: string
   questionNumber: number
   totalQuestions: number
   isVisible: boolean
@@ -13,6 +14,7 @@ interface QuestionPanelProps {
 
 export default function QuestionPanel({
   question,
+  topic,
   questionNumber,
   totalQuestions,
   isVisible,
@@ -53,8 +55,12 @@ export default function QuestionPanel({
       <div className="flex items-center justify-between mb-4">
         <div className="flex items-center space-x-3">
           <div className="bg-meet-blue text-white px-4 py-1 rounded-full text-sm font-semibold">
-            Question {questionNumber} of {totalQuestions}
           </div>
+          {topic && (
+            <div className="bg-meet-gray text-meet-blue px-3 py-1 rounded-full text-sm font-semibold border border-meet-blue/30">
+              {topic}
+            </div>
+          )}
           {isTyping && (
             <div className="flex space-x-1">
               <div className="w-2 h-2 bg-meet-blue rounded-full animate-bounce" style={{ animationDelay: '0ms' }} />

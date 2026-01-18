@@ -23,30 +23,25 @@ class GoogleTTSClient:
     def __init__(self):
         """Initialize Google TTS client"""
         self.client = None
-        self.voice_name = "en-US-Neural2-F"  # Female professional voice
+        self.voice_name = "en-US-Wavenet-F"  # Female professional voice
         self.language_code = "en-US"
         
         try:
-            # Try service account first
-            if settings.google_tts_service_account_path and os.path.exists(settings.google_tts_service_account_path):
-                credentials = service_account.Credentials.from_service_account_file(
-                    settings.google_tts_service_account_path
-                )
+            # Enforce service account usage
+            sa_path = settings.google_tts_service_account_path
+            
+            if not sa_path:
+                # Try default generic location if not specified
+                sa_path = "service-account.json"
+                
+            if os.path.exists(sa_path):
+                credentials = service_account.Credentials.from_service_account_file(sa_path)
                 self.client = texttospeech.TextToSpeechClient(credentials=credentials)
-                logger.info("Google TTS initialized with service account")
-            # Try API key (if available in future)
-            elif settings.google_tts_key:
-                # Note: TTS typically requires service account, but keeping for flexibility
-                self.client = texttospeech.TextToSpeechClient()
-                logger.info("Google TTS initialized with API key")
+                logger.info(f"Google TTS initialized with Service Account: {sa_path}")
             else:
-                # Try default credentials (for GCP environments)
-                try:
-                    self.client = texttospeech.TextToSpeechClient()
-                    logger.info("Google TTS initialized with default credentials")
-                except Exception as e:
-                    logger.warning(f"Google TTS not configured: {e}")
-                    self.client = None
+                logger.error(f"Service Account not found at: {sa_path}. TTS will be disabled.")
+                self.client = None
+                
         except Exception as e:
             logger.error(f"Failed to initialize Google TTS client: {e}")
             self.client = None
