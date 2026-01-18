@@ -14,6 +14,7 @@ import Timer from '../components/Timer'
 import HRAvatar from '../components/HRAvatar'
 import QuestionPanel from '../components/QuestionPanel'
 import StatusIndicator from '../components/StatusIndicator'
+import WebcamPreview from '../components/WebcamPreview'
 
 type InterviewState = 'idle' | 'setup' | 'listening' | 'thinking' | 'speaking' | 'completed'
 
@@ -412,6 +413,9 @@ export default function Interview() {
           </div>
         </div>
       </div>
+
+      {/* Webcam Preview - Bottom Right Corner */}
+      <WebcamPreview />
     </div>
   )
 }
